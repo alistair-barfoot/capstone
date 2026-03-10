@@ -5,7 +5,7 @@ using System.Collections.Generic;
 
 public class CameraImageSubscriberDebug : MonoBehaviour
 {
-    public string imageTopic = "/camera/color/image_raw";
+    public string imageTopic = "/color/image_raw/compressed";
     public Renderer displayRenderer;
 
     private Texture2D cameraTexture;
@@ -43,7 +43,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
     private double frameDisplayTime = 0.0;
 
     private float networkLatencyMs = 0f;
-    private float processingLatencyMs = 0f;
+    private float decompressionLatencyMs = 0f; // Changed from processingLatencyMs
     private float renderLatencyMs = 0f;
 
     private string latencyDebugStatus = "Waiting for data...";
@@ -51,20 +51,27 @@ public class CameraImageSubscriberDebug : MonoBehaviour
     private double firstRosTimestamp = -1.0;
     private bool usingMonotonicTime = false;
 
+    // Compression stats
+    private long totalCompressedBytes = 0;
+    private long totalUncompressedBytes = 0;
+    private int compressionStatsCount = 0;
+
     // Optional drop policy
     [Header("Drop Policy")]
     [SerializeField] private bool dropStaleFrames = true;
     [SerializeField] private float maxAcceptableTotalLatencyMs = 300f;
 
-    // Encoding conversion scratch
-    private byte[] scratchRgb;
-
     // Cached GUI style
     private GUIStyle guiStyle;
+    
+    // Latest message handling
+    private CompressedImageMsg latestImageMsg = null;
+    private bool hasNewImage = false;
+    private readonly object imageLock = new object();
 
     void Start()
     {
-        Debug.Log("=== Camera Image Subscriber DEBUG Starting ===");
+        Debug.Log("=== Compressed Camera Image Subscriber Starting ===");
 
         if (displayRenderer == null)
         {
@@ -78,10 +85,10 @@ public class CameraImageSubscriberDebug : MonoBehaviour
             }
         }
 
-        Debug.Log($" Renderer found: {displayRenderer.gameObject.name}");
+        Debug.Log($"  Renderer found: {displayRenderer.gameObject.name}");
 
         // TEST texture (red)
-        Debug.Log("TEST 1: Applying RED test texture...");
+        Debug.Log("TEST: Applying RED test texture...");
 
         Texture2D redTexture = new Texture2D(256, 256, TextureFormat.RGB24, false);
         Color[] redPixels = new Color[256 * 256];
@@ -96,7 +103,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
 
         if (unlitShader == null)
         {
-            Debug.LogWarning(" Unlit/Texture shader not found, using existing material");
+            Debug.LogWarning("  Unlit/Texture shader not found, using existing material");
             displayRenderer.material.mainTexture = redTexture;
         }
         else
@@ -120,23 +127,54 @@ public class CameraImageSubscriberDebug : MonoBehaviour
 
         ROSConnection ros = ROSConnection.GetOrCreateInstance();
 
-        Debug.Log($" ROS Connection: {ros.RosIPAddress}:{ros.RosPort}");
+        Debug.Log($"  ROS Connection: {ros.RosIPAddress}:{ros.RosPort}");
 
-        ros.Subscribe<ImageMsg>(imageTopic, UpdateCameraImage);
+        // Subscribe to CompressedImageMsg instead of ImageMsg
+        ros.Subscribe<CompressedImageMsg>(imageTopic, UpdateCameraImage);
 
-        Debug.Log($" Subscribed to: {imageTopic}");
-        Debug.Log(" === Waiting for ROS images (Quad should be RED while waiting) ===");
+        Debug.Log($"  Subscribed to COMPRESSED topic: {imageTopic}");
+        Debug.Log("  === Waiting for ROS images (Quad should be RED while waiting) ===");
 
         if (enableLatencyMeasurement)
         {
-            Debug.Log("=== LATENCY MEASUREMENT ENABLED ===");
-            Debug.Log($" Need {calibrationSamples} frames for clock calibration");
+            Debug.Log("=== LATENCY MEASUREMENT ENABLED (Compressed) ===");
+            Debug.Log($"  Need {calibrationSamples} frames for clock calibration");
 
             latencyDebugStatus = "Waiting for first frame...";
         }
     }
 
-    void UpdateCameraImage(ImageMsg imageMsg)
+    void UpdateCameraImage(CompressedImageMsg compressedMsg)
+    {
+        // Store only the latest image - discard any previous unprocessed ones
+        lock (imageLock)
+        {
+            latestImageMsg = compressedMsg;
+            hasNewImage = true;
+        }
+    }
+    
+    void Update()
+    {
+        // Process the latest image if available
+        CompressedImageMsg imageToProcess = null;
+        
+        lock (imageLock)
+        {
+            if (hasNewImage && latestImageMsg != null)
+            {
+                imageToProcess = latestImageMsg;
+                hasNewImage = false;
+            }
+        }
+        
+        if (imageToProcess != null)
+        {
+            ProcessCompressedImage(imageToProcess);
+        }
+    }
+    
+    void ProcessCompressedImage(CompressedImageMsg compressedMsg)
     {
         messageCount++;
 
@@ -144,22 +182,23 @@ public class CameraImageSubscriberDebug : MonoBehaviour
 
         if (enableLatencyMeasurement)
         {
-            double rosTimestampSec = imageMsg.header.stamp.sec;
-            double rosTimestampNsec = imageMsg.header.stamp.nanosec;
+            double rosTimestampSec = compressedMsg.header.stamp.sec;
+            double rosTimestampNsec = compressedMsg.header.stamp.nanosec;
             double rosTimestamp = rosTimestampSec + (rosTimestampNsec / 1e9);
 
             frameCaptureTime = rosTimestamp;
 
             if (messageCount == 1)
             {
-                Debug.Log($"=== FIRST FRAME META ===");
-                Debug.Log($" w={imageMsg.width} h={imageMsg.height} enc={imageMsg.encoding} step={imageMsg.step} len={imageMsg.data.Length}");
-                Debug.Log($" ROS stamp: {rosTimestampSec}.{rosTimestampNsec:D9} (combined {rosTimestamp:F6})");
-                Debug.Log($" Unity receive time: {frameReceiveTime:F6}");
+                Debug.Log($"=== FIRST COMPRESSED FRAME ===");
+                Debug.Log($"  Format: {compressedMsg.format}");
+                Debug.Log($"  Compressed size: {compressedMsg.data.Length} bytes ({compressedMsg.data.Length / 1024f:F1} KB)");
+                Debug.Log($"  ROS stamp: {rosTimestampSec}.{rosTimestampNsec:D9} (combined {rosTimestamp:F6})");
+                Debug.Log($"  Unity receive time: {frameReceiveTime:F6}");
 
                 if (rosTimestamp <= 0)
                 {
-                    Debug.LogError(" ❌ ROS TIMESTAMP INVALID (<=0). Latency stats will be disabled.");
+                    Debug.LogError("  ROS TIMESTAMP INVALID (<=0). Latency stats will be disabled.");
                     rosTimestampValid = false;
                     latencyDebugStatus = "ERROR: ROS timestamp invalid";
                 }
@@ -174,6 +213,8 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                     timeOffsetCalculated = false;
 
                     latencyDebugStatus = $"Calibrating (0/{calibrationSamples})...";
+                    
+                    Debug.Log("  ROS timestamp valid. Starting calibration...");
                 }
             }
 
@@ -192,9 +233,12 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                     rosToUnityTimeOffset = calibrationOffsets[calibrationSamples / 2];
 
                     timeOffsetCalculated = true;
-                    latencyDebugStatus = "✅ Measuring latency";
+                    latencyDebugStatus = "Measuring latency";
 
-                    Debug.Log($"✅ TIME CALIBRATION COMPLETE. Offset={rosToUnityTimeOffset * 1000:F2} ms");
+                    Debug.Log($"╔════════════════════════════════════════╗");
+                    Debug.Log($"║  TIME CALIBRATION COMPLETE          ║");
+                    Debug.Log($"╚════════════════════════════════════════╝");
+                    Debug.Log($"  Offset: {rosToUnityTimeOffset * 1000:F2} ms");
                 }
             }
 
@@ -202,6 +246,13 @@ public class CameraImageSubscriberDebug : MonoBehaviour
             {
                 double adjustedDiff = frameReceiveTime - frameCaptureTime - rosToUnityTimeOffset;
                 networkLatencyMs = (float)(adjustedDiff * 1000.0);
+                
+                // Drop stale frames if enabled and latency is too high
+                if (dropStaleFrames && networkLatencyMs > maxAcceptableTotalLatencyMs)
+                {
+                    Debug.LogWarning($"Dropping stale frame: latency {networkLatencyMs:F1}ms > {maxAcceptableTotalLatencyMs}ms");
+                    return;
+                }
             }
         }
 
@@ -232,62 +283,66 @@ public class CameraImageSubscriberDebug : MonoBehaviour
         {
             double processStartTime = GetCurrentTimeSeconds();
 
-            int width = (int)imageMsg.width;
-            int height = (int)imageMsg.height;
-
-            if (cameraTexture == null || cameraTexture.width != width || cameraTexture.height != height)
+            // Create texture if needed (will be resized by LoadImage)
+            if (cameraTexture == null)
             {
-                cameraTexture = new Texture2D(width, height, TextureFormat.RGB24, false);
-
+                cameraTexture = new Texture2D(2, 2, TextureFormat.RGB24, false);
                 cameraTexture.wrapMode = TextureWrapMode.Clamp;
                 cameraTexture.filterMode = FilterMode.Bilinear;
-
-                displayRenderer.material.mainTexture = cameraTexture;
-
-                Debug.Log($"✓ Texture created: {width}x{height}, format: RGB24");
             }
 
-            string enc = (imageMsg.encoding ?? "").ToLowerInvariant();
+            // Decompress JPEG using Unity's ImageConversion
+            bool success = ImageConversion.LoadImage(cameraTexture, compressedMsg.data);
 
-            if (enc == "" || enc == "rgb8" || enc == "rgb24")
+            if (!success)
             {
-                cameraTexture.LoadRawTextureData(imageMsg.data);
-            }
-            else if (enc == "bgr8")
-            {
-                EnsureScratch(width * height * 3);
-                BgrToRgb(imageMsg.data, scratchRgb);
-                cameraTexture.LoadRawTextureData(scratchRgb);
-            }
-            else if (enc == "rgba8")
-            {
-                EnsureScratch(width * height * 3);
-                RgbaToRgb(imageMsg.data, scratchRgb);
-                cameraTexture.LoadRawTextureData(scratchRgb);
-            }
-            else if (enc == "bgra8")
-            {
-                EnsureScratch(width * height * 3);
-                BgraToRgb(imageMsg.data, scratchRgb);
-                cameraTexture.LoadRawTextureData(scratchRgb);
-            }
-            else
-            {
-                if (messageCount == 1)
-                    Debug.LogWarning($"⚠️ Unknown encoding '{imageMsg.encoding}'. Trying raw upload.");
-
-                cameraTexture.LoadRawTextureData(imageMsg.data);
+                Debug.LogError($"Failed to decompress image at frame {messageCount}");
+                return;
             }
 
-            cameraTexture.Apply(false, false);
+            // Apply to renderer
+            displayRenderer.material.mainTexture = cameraTexture;
 
             frameProcessTime = GetCurrentTimeSeconds();
-            processingLatencyMs = (float)((frameProcessTime - processStartTime) * 1000.0);
+            decompressionLatencyMs = (float)((frameProcessTime - processStartTime) * 1000.0);
+
+            // Compression statistics
+            compressionStatsCount++;
+            totalCompressedBytes += compressedMsg.data.Length;
+            totalUncompressedBytes += cameraTexture.width * cameraTexture.height * 3; // RGB24
+
+            if (messageCount == 1)
+            {
+                Debug.Log($"First image decompressed successfully:");
+                Debug.Log($"   Compressed: {compressedMsg.data.Length} bytes ({compressedMsg.data.Length / 1024f:F1} KB)");
+                Debug.Log($"   Uncompressed: {cameraTexture.width}x{cameraTexture.height} = {cameraTexture.width * cameraTexture.height * 3 / 1024f:F1} KB");
+                Debug.Log($"   Format: {cameraTexture.format}");
+                Debug.Log($"   Decompression time: {decompressionLatencyMs:F2} ms");
+                float ratio = (cameraTexture.width * cameraTexture.height * 3) / (float)compressedMsg.data.Length;
+                Debug.Log($"   Compression ratio: {ratio:F1}x");
+            }
+
+            // Periodic compression stats
+            if (messageCount % 60 == 0)
+            {
+                float avgCompressedKB = (totalCompressedBytes / (float)compressionStatsCount) / 1024f;
+                float avgUncompressedKB = (totalUncompressedBytes / (float)compressionStatsCount) / 1024f;
+                float compressionRatio = totalUncompressedBytes / (float)totalCompressedBytes;
+                float bandwidthSaved = (1 - 1 / compressionRatio) * 100f;
+
+                Debug.Log($"╔════════════════════════════════════════╗");
+                Debug.Log($"║  COMPRESSION STATS ({compressionStatsCount} frames)");
+                Debug.Log($"╚════════════════════════════════════════╝");
+                Debug.Log($"  Avg compressed: {avgCompressedKB:F1} KB/frame");
+                Debug.Log($"  Avg uncompressed: {avgUncompressedKB:F1} KB/frame");
+                Debug.Log($"  Compression ratio: {compressionRatio:F1}x");
+                Debug.Log($"  Bandwidth saved: {bandwidthSaved:F1}%");
+            }
         }
         catch (System.Exception e)
         {
-            Debug.LogError($" EXCEPTION: {e.Message}");
-            Debug.LogError($" Stack trace: {e.StackTrace}");
+            Debug.LogError($"EXCEPTION: {e.Message}");
+            Debug.LogError($"  Stack trace: {e.StackTrace}");
         }
     }
 
@@ -321,43 +376,23 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                 }
 
                 avgLatencyMs = (float)(latencySum / latencyCount);
+
+                // Periodic latency breakdown
+                if (messageCount % 60 == 0)
+                {
+                    Debug.Log($"╔════════════════════════════════════════╗");
+                    Debug.Log($"║  LATENCY BREAKDOWN (Compressed)        ║");
+                    Debug.Log($"╚════════════════════════════════════════╝");
+                    Debug.Log($"  Total Latency:         {currentLatencyMs:F2} ms");
+                    Debug.Log($"  Network Latency:       {networkLatencyMs:F2} ms");
+                    Debug.Log($"  Decompression Latency: {decompressionLatencyMs:F2} ms");
+                    Debug.Log($"  Render Latency:        {renderLatencyMs:F2} ms");
+                    Debug.Log($"  ────────────────────────────────────────");
+                    Debug.Log($"  Min: {minLatencyMs:F2} ms");
+                    Debug.Log($"  Avg: {avgLatencyMs:F2} ms");
+                    Debug.Log($"  Max: {maxLatencyMs:F2} ms");
+                }
             }
-        }
-    }
-
-    private void EnsureScratch(int n)
-    {
-        if (scratchRgb == null || scratchRgb.Length != n)
-            scratchRgb = new byte[n];
-    }
-
-    static void BgrToRgb(byte[] src, byte[] dst)
-    {
-        for (int i = 0, j = 0; j < dst.Length; i += 3, j += 3)
-        {
-            dst[j] = src[i + 2];
-            dst[j + 1] = src[i + 1];
-            dst[j + 2] = src[i];
-        }
-    }
-
-    static void RgbaToRgb(byte[] src, byte[] dst)
-    {
-        for (int i = 0, j = 0; j < dst.Length; i += 4, j += 3)
-        {
-            dst[j] = src[i];
-            dst[j + 1] = src[i + 1];
-            dst[j + 2] = src[i + 2];
-        }
-    }
-
-    static void BgraToRgb(byte[] src, byte[] dst)
-    {
-        for (int i = 0, j = 0; j < dst.Length; i += 4, j += 3)
-        {
-            dst[j] = src[i + 2];
-            dst[j + 1] = src[i + 1];
-            dst[j + 2] = src[i];
         }
     }
 
@@ -376,10 +411,10 @@ public class CameraImageSubscriberDebug : MonoBehaviour
         guiStyle.fontSize = 28;
         guiStyle.normal.textColor = Color.yellow;
 
-        GUI.Label(new Rect(10, yOffset, 1200, lineHeight), $"Topic: {imageTopic}", guiStyle);
+        GUI.Label(new Rect(10, yOffset, 1400, lineHeight), $"Topic: {imageTopic} (COMPRESSED)", guiStyle);
         yOffset += lineHeight;
 
-        GUI.Label(new Rect(10, yOffset, 1200, lineHeight), $"Messages: {messageCount}", guiStyle);
+        GUI.Label(new Rect(10, yOffset, 1200, lineHeight), $"Frames: {messageCount}", guiStyle);
         yOffset += lineHeight;
 
         if (testTextureApplied && messageCount == 0)
@@ -388,6 +423,11 @@ public class CameraImageSubscriberDebug : MonoBehaviour
             guiStyle.fontSize = 32;
 
             GUI.Label(new Rect(10, yOffset, 1200, lineHeight), "QUAD SHOULD BE RED - IS IT?", guiStyle);
+            yOffset += lineHeight;
+            
+            guiStyle.fontSize = 24;
+            guiStyle.normal.textColor = Color.yellow;
+            GUI.Label(new Rect(10, yOffset, 1400, lineHeight), "Waiting for compressed images...", guiStyle);
             return;
         }
 
@@ -396,18 +436,87 @@ public class CameraImageSubscriberDebug : MonoBehaviour
             guiStyle.normal.textColor = Color.green;
             guiStyle.fontSize = 24;
 
-            GUI.Label(new Rect(10, yOffset, 1200, lineHeight), $"✓ Receiving images from ROS", guiStyle);
+            GUI.Label(new Rect(10, yOffset, 1400, lineHeight), $"Receiving COMPRESSED images", guiStyle);
             yOffset += lineHeight;
 
             if (cameraTexture != null)
             {
                 GUI.Label(
                     new Rect(10, yOffset, 1200, lineHeight),
-                    $"Texture: {cameraTexture.width}x{cameraTexture.height} ({cameraTexture.format})",
+                    $"Resolution: {cameraTexture.width}x{cameraTexture.height}",
                     guiStyle
                 );
 
                 yOffset += lineHeight;
+            }
+
+            // Compression stats
+            if (compressionStatsCount > 0)
+            {
+                float avgCompressedKB = (totalCompressedBytes / (float)compressionStatsCount) / 1024f;
+                float compressionRatio = totalUncompressedBytes / (float)totalCompressedBytes;
+
+                guiStyle.normal.textColor = Color.cyan;
+                guiStyle.fontSize = 22;
+                GUI.Label(
+                    new Rect(10, yOffset, 1200, lineHeight),
+                    $"Avg: {avgCompressedKB:F1} KB/frame | Ratio: {compressionRatio:F1}x",
+                    guiStyle
+                );
+                yOffset += lineHeight;
+            }
+
+            // Latency display
+            if (enableLatencyMeasurement)
+            {
+                yOffset += 10;
+
+                if (timeOffsetCalculated && rosTimestampValid)
+                {
+                    // Color code based on total latency
+                    if (currentLatencyMs < 50f)
+                        guiStyle.normal.textColor = Color.green;
+                    else if (currentLatencyMs < 100f)
+                        guiStyle.normal.textColor = Color.yellow;
+                    else
+                        guiStyle.normal.textColor = Color.red;
+
+                    guiStyle.fontSize = 36;
+                    GUI.Label(
+                        new Rect(10, yOffset, 1200, lineHeight + 10),
+                        $"TOTAL: {currentLatencyMs:F1} ms",
+                        guiStyle
+                    );
+                    yOffset += lineHeight + 10;
+
+                    guiStyle.fontSize = 24;
+                    guiStyle.normal.textColor = Color.cyan;
+                    GUI.Label(
+                        new Rect(10, yOffset, 1200, lineHeight),
+                        $"Min: {minLatencyMs:F1} | Avg: {avgLatencyMs:F1} | Max: {maxLatencyMs:F1}",
+                        guiStyle
+                    );
+                    yOffset += lineHeight;
+
+                    // Breakdown
+                    guiStyle.fontSize = 22;
+                    guiStyle.normal.textColor = Color.white;
+                    GUI.Label(
+                        new Rect(10, yOffset, 1400, lineHeight),
+                        $"Net: {networkLatencyMs:F1}ms | Decomp: {decompressionLatencyMs:F1}ms | Render: {renderLatencyMs:F1}ms",
+                        guiStyle
+                    );
+                }
+                else
+                {
+                    guiStyle.normal.textColor = Color.yellow;
+                    guiStyle.fontSize = 24;
+                    GUI.Label(
+                        new Rect(10, yOffset, 1400, lineHeight),
+                        $"{latencyDebugStatus}",
+                        guiStyle
+                    );
+                }
             }
         }
     }
