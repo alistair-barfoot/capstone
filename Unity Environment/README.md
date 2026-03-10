@@ -274,45 +274,52 @@ sensor_msgs/msg/CompressedImage
 
 Use this order every time:
 
-1. Terminal 1
+### 1. Terminal 1
 
 Start ROS TCP endpoint:
-
+```bash
 ssh unitree@192.168.123.164
 cd ~/capstone_ws
 source install/setup.bash
 ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=192.168.1.133 -p ROS_TCP_PORT:=10000
-2. Terminal 2
+```
+### 2. Terminal 2
 
 Start RealSense node:
-
+```bash
 ssh unitree@192.168.123.164
 cd ~/capstone_ws
 source install/setup.bash
 ros2 run realsense2_camera realsense2_camera_node
+```
 
 Wait until you see:
-
+```
 RealSense Node Is Up!
-3. Terminal 3
+```
+### 3. Terminal 3
 
 Start compressor:
-
+```bash
 ssh unitree@192.168.123.164
 cd ~/capstone_ws
 source install/setup.bash
 python3 image_compressor_no_bridge.py
-4. Unity
+```
+### 4. Unity
 
 Run the Unity project and connect to the endpoint.
 
-Troubleshooting
-Problem: SSH fails
+## Troubleshooting
+
+### Problem: SSH fails
 
 Use the correct robot IP:
-
+```
 192.168.123.164
-Problem: RealSense says “device or resource busy”
+```
+
+### Problem: RealSense says "device or resource busy"
 
 Another process is already using the camera.
 
