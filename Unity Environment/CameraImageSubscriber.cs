@@ -114,9 +114,9 @@ public class CameraImageSubscriberDebug : MonoBehaviour
 
         testTextureApplied = true;
 
-        // Flip vertically
-        displayRenderer.material.mainTextureScale = new Vector2(1f, -1f);
-        displayRenderer.material.mainTextureOffset = new Vector2(0f, 1f);
+        // Remove vertical flip (right-side up)
+        displayRenderer.material.mainTextureScale = new Vector2(1f, 1f);
+        displayRenderer.material.mainTextureOffset = new Vector2(0f, 0f);
 
         guiStyle = new GUIStyle
         {
