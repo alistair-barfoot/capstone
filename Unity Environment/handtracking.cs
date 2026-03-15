@@ -49,7 +49,7 @@ public class HandTipHUD : MonoBehaviour
     float timeSinceCalibrate = 0f;
 
     float userArmLength = 0.8f; // meters
-    float g1ArmLength = 0.45f;  // meters
+    float g1ArmLength = 0.51f;  // meters
 
     bool _openHandActiveLeft = false;
     bool _openHandActiveRight = false;
@@ -57,6 +57,34 @@ public class HandTipHUD : MonoBehaviour
     [Header("Settings")]
     public XRHandJointID jointToShow = XRHandJointID.IndexTip;
     public int decimals = 3;
+
+    // ========== LATENCY MEASUREMENT ==========
+    [Header("Latency Measurement")]
+    [SerializeField] private bool enableLatencyMeasurement = true;
+    [SerializeField] private int latencySampleSize = 100;
+    [SerializeField] private bool logLatencyToConsole = true;
+    
+    private float currentLatencyMs = 0f;
+    private float minLatencyMs = float.MaxValue;
+    private float maxLatencyMs = 0f;
+    private float avgLatencyMs = 0f;
+    
+    private double latencySum = 0.0;
+    private int latencyCount = 0;
+    private int frameCount = 0;
+    
+    // Timing measurement points
+    private double handPoseStartTime = 0.0;
+    private double handProcessStartTime = 0.0;
+    private double handProcessEndTime = 0.0;
+    private double rosPublishStartTime = 0.0;
+    private double rosPublishEndTime = 0.0;
+    
+    // Component latencies
+    private float handProcessingLatencyMs = 0f;
+    private float rosPublishingLatencyMs = 0f;
+    
+    private string latencyDebugStatus = "Waiting for hand tracking data...";
 
     XRHandSubsystem _hands;
 
@@ -174,6 +202,12 @@ public class HandTipHUD : MonoBehaviour
         if (textLeft != null) textLeft.text = status;
         if (textRight != null) textRight.text = status;
 
+        if (enableLatencyMeasurement)
+        {
+            Debug.Log("HTHUD: Latency measurement enabled");
+            latencyDebugStatus = "Latency tracking initialized";
+        }
+
         Debug.Log($"HTHUD: gesture assigned? {(gesture != null)}");
     }
 
@@ -185,6 +219,13 @@ public class HandTipHUD : MonoBehaviour
 
         if (_hands == null || xrOrigin == null || xrCamera == null) return;
         if (textLeft == null || textRight == null) return;
+
+        // Start latency measurement
+        if (enableLatencyMeasurement)
+        {
+            handPoseStartTime = Time.realtimeSinceStartupAsDouble;
+            handProcessStartTime = handPoseStartTime;
+        }
 
         (Vector3 leftJoints, Quaternion leftRot) = FormatJointFromHeadset(_hands.leftHand);
         (Vector3 rightJoints, Quaternion rightRot) = FormatJointFromHeadset(_hands.rightHand);
@@ -204,6 +245,13 @@ public class HandTipHUD : MonoBehaviour
 
         leftJoints *= g1ArmLength / userArmLength;
         rightJoints *= g1ArmLength / userArmLength;
+        
+        // Mark end of hand processing
+        if (enableLatencyMeasurement)
+        {
+            handProcessEndTime = Time.realtimeSinceStartupAsDouble;
+            handProcessingLatencyMs = (float)((handProcessEndTime - handProcessStartTime) * 1000.0);
+        }
 
         string leftJointsStr = $"{leftJoints.x.ToString($"F{decimals}")}, " +
                                $"{leftJoints.z.ToString($"F{decimals}")}, " +
@@ -222,6 +270,12 @@ public class HandTipHUD : MonoBehaviour
         {
             Debug.LogError($"[{Time.time:F1}s] ROS connection not established! Check ROS Settings (Robotics > ROS Settings).");
             return;
+        }
+        
+        // Start ROS publishing timing
+        if (enableLatencyMeasurement)
+        {
+            rosPublishStartTime = Time.realtimeSinceStartupAsDouble;
         }
 
         var currentTime = Time.time;
@@ -262,6 +316,22 @@ public class HandTipHUD : MonoBehaviour
 
         var rightHandStatus = new BoolMsg { data = _openHandActiveRight };
         ros.Publish(topicName + "_right_status", rightHandStatus);
+        
+        // Complete latency measurement
+        if (enableLatencyMeasurement)
+        {
+            rosPublishEndTime = Time.realtimeSinceStartupAsDouble;
+            rosPublishingLatencyMs = (float)((rosPublishEndTime - rosPublishStartTime) * 1000.0);
+            currentLatencyMs = (float)((rosPublishEndTime - handPoseStartTime) * 1000.0);
+            
+            UpdateLatencyStats();
+            
+            frameCount++;
+            if (logLatencyToConsole && frameCount % 30 == 0) // Log every 30 frames
+            {
+                LogLatencyStats();
+            }
+        }
 
         timeElapsed = 0;
     }
@@ -308,5 +378,40 @@ public class HandTipHUD : MonoBehaviour
         Vector3 fromHead = xrCamera.InverseTransformPoint(jointWorld);
 
         return (fromHead, rot);
+    }
+    
+    void UpdateLatencyStats()
+    {
+        if (currentLatencyMs > 0 && currentLatencyMs < 10000) // Sanity check
+        {
+            latencySum += currentLatencyMs;
+            latencyCount++;
+            
+            if (currentLatencyMs < minLatencyMs)
+                minLatencyMs = currentLatencyMs;
+            if (currentLatencyMs > maxLatencyMs)
+                maxLatencyMs = currentLatencyMs;
+                
+            // Keep rolling average within sample size
+            if (latencyCount > latencySampleSize)
+            {
+                latencySum -= avgLatencyMs;
+                latencyCount--;
+            }
+            
+            avgLatencyMs = latencyCount > 0 ? (float)(latencySum / latencyCount) : 0f;
+            
+            latencyDebugStatus = $"Total: {currentLatencyMs:F1}ms | Avg: {avgLatencyMs:F1}ms | Min: {minLatencyMs:F1}ms | Max: {maxLatencyMs:F1}ms";
+        }
+    }
+    
+    void LogLatencyStats()
+    {
+        Debug.Log($"[HAND TRACKING LATENCY] Frame {frameCount}: {latencyDebugStatus}");
+        Debug.Log($"[HAND TRACKING BREAKDOWN] Processing: {handProcessingLatencyMs:F1}ms | ROS Publish: {rosPublishingLatencyMs:F1}ms");
+        
+        bool leftTracked = _hands.leftHand.isTracked;
+        bool rightTracked = _hands.rightHand.isTracked;
+        Debug.Log($"[HAND TRACKING STATUS] Left: {leftTracked} | Right: {rightTracked} | Publish Rate: {(1000f / publishMessageFrequency):F0}Hz");
     }
 }
