@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source armControl/bin/activate
 
-source ~/unitree_ros2/setup_default.sh
+source ~/unitree_ros2/setup.sh
 
 export PATH=/opt/openrobots/bin:$PATH
 export PKG_CONFIG_PATH=/opt/openrobots/lib/pkgconfig:$PKG_CONFIG_PATH

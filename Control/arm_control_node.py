@@ -17,18 +17,18 @@ from unitree_sdk2py.utils.crc import CRC
 from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 
 # Local imports
-from .g1_utils import JOINT_MAP, G1Motors, WeightedMovingFilter
-from .ik_solver import DualArmIKSolver
+from g1_utils import JOINT_MAP, G1Motors, WeightedMovingFilter
+from ik_solver import DualArmIKSolver
 
 class G1VRController(Node):
     def __init__(self):
         super().__init__('g1_vr_controller')
 
         # Dynamically find URDF in ROS 2 package
-        urdf_path = f"{get_package_share_directory('g1_vr_control')}/urdf/g1_29dof.urdf"
+        urdf_path = "./g1_29dof.urdf" #f"{get_package_share_directory('g1_vr_control')}/urdf/g1_29dof.urdf"
         self.dt = 0.002
         self.ik_solver = DualArmIKSolver(urdf_path, self.dt)
-        self.smoothFilter = WeightedMovingFilter(weights=[1.0], window_size=5)
+        self.smooth_filter = WeightedMovingFilter(weights=[1.0], window_size=5)
 
         # Arm state variables
         self.target_pos_l = np.array([0.3, 0.3, 0.23])
@@ -40,16 +40,16 @@ class G1VRController(Node):
         self.current_hand_state = {"left": False, "right": False}
 
         # Subscribers
-        self.create_subscription(PoseStamped, '/pos_rot_left', lambda msg: self.arm_callback(msg, true), 10)
-        self.create_subscription(Bool, '/pos_rot_left_status', lambda msg: self.grip_callback(msg, true), 10)
-        self.create_subscription(PoseStamped, '/pos_rot_right', lambda msg: self.arm_callback(msg, false), 10)
-        self.create_subscription(Bool, '/pos_rot_right_status', lambda msg: self.grip_callback(msg, false), 10)
+        self.create_subscription(PoseStamped, '/pos_rot_left', lambda msg: self.arm_callback(msg, True), 10)
+        self.create_subscription(Bool, '/pos_rot_left_status', lambda msg: self.grip_callback(msg, "left"), 10)
+        self.create_subscription(PoseStamped, '/pos_rot_right', lambda msg: self.arm_callback(msg, False), 10)
+        self.create_subscription(Bool, '/pos_rot_right_status', lambda msg: self.grip_callback(msg, "right"), 10)
 
         # Threading and Unitree States
-        self.motorDataLock = threading.Lock()
-        self.motorDataBuffer = None
-        self.modeMachine = None
-        self.firstRead = True
+        self.motor_data_lock = threading.Lock()
+        self.motor_data_buffer = None
+        self.mode_machine = None
+        self.first_read = True
         self.initialized = False
         
         self._setup_unitree()
@@ -85,13 +85,15 @@ class G1VRController(Node):
         self.right_hand_cmd = unitree_hg_msg_dds__HandCmd_()
 
     def arm_callback(self, msg, left):
-        pos = np.array([msg.pose.position.y, msg.pose.position.x * -1.0, (msg.pose.position.z * -1.0) + 0.24])
-        quat = pin.Quaternion(msg.pose.orientation.w, msg.pose.orientation.y, msg.pose.orientation.x, msg.pose.orientation.z)
+        pos = np.array([msg.pose.position.y, msg.pose.position.x * -1.0, (msg.pose.position.z * -1.0) + 0.55])
+        
         
         if left:
+            quat = pin.Quaternion(msg.pose.orientation.w, msg.pose.orientation.y, msg.pose.orientation.z * -1.0, msg.pose.orientation.x)
             self.target_pos_l, self.target_rot_l = pos, quat.matrix()
         else:
-            self.target_pos_r, self.target_rot_r = pos, quat.matrix()
+            quat = pin.Quaternion(msg.pose.orientation.w, msg.pose.orientation.y, msg.pose.orientation.x * -1.0, msg.pose.orientation.z)
+            self.target_pos_r, self.target_rot_r = pos, (quat.matrix() @ np.array([[1,0,0],[0,-1,0],[0,0,-1]]))
 
     def grip_callback(self, msg, side):
         self.hand_state[side] = msg.data
@@ -100,12 +102,12 @@ class G1VRController(Node):
         if msg is not None:
             lowstate = G1Motors()
             for id in range(35):
-                lowstate.motorData[id].q = msg.motor_state[id].q
-                lowstate.motorData[id].dq = msg.motor_state[id].dq
-            with self.motorDataLock:
-                self.motorDataBuffer = lowstate
-                self.modeMachine = msg.mode_machine
-            self.firstRead = False
+                lowstate.motor_data[id].q = msg.motor_state[id].q
+                lowstate.motor_data[id].dq = msg.motor_state[id].dq
+            with self.motor_data_lock:
+                self.motor_data_buffer = lowstate
+                self.mode_machine = msg.mode_machine
+            self.first_read = False
 
     def control_hand(self, side, is_open):
         cmd = self.left_hand_cmd if side == "left" else self.right_hand_cmd
@@ -125,22 +127,23 @@ class G1VRController(Node):
             cmd.motor_cmd[i].tau = 0.0
             
         pub.Write(cmd)
-        self.get_logger().info(f"Dex3 {side} hand commanded to {'OPEN' if is_open else 'CLOSE'}")
+        #self.get_logger().info(f"Dex3 {side} hand commanded to {'OPEN' if is_open else 'CLOSE'}")
 
     def controlLoop(self):
-        if self.firstRead:
+        if self.first_read:
+            self.get_logger().info("WAITING TO SUBSCRIBE HAND DATA")
             return
             
         if not self.initialized:
-            with self.motorDataLock:
-                currentQSensor = pin.neutral(self.ik_solver.model)
+            with self.motor_data_lock:
+                current_q_sensor = pin.neutral(self.ik_solver.model)
                 for name, motorId in JOINT_MAP.items():
                     if self.ik_solver.model.existJointName(name):
                         idx_q = self.ik_solver.model.joints[self.ik_solver.model.getJointId(name)].idx_q
                         if idx_q != -1:
-                            currentQSensor[idx_q] = self.motorDataBuffer.motorData[motorId].q
-                self.lastSolvedQ = currentQSensor
-            self.smoothFilter.add_data(self.lastSolvedQ)
+                            current_q_sensor[idx_q] = self.motor_data_buffer.motor_data[motorId].q
+                self.last_solved_q = current_q_sensor
+            self.smooth_filter.add_data(self.last_solved_q)
             self.initialized = True
             return
 
@@ -152,15 +155,15 @@ class G1VRController(Node):
                     self.current_hand_state[side] = self.hand_state[side]
 
             # Solve IK for both arms
-            raw_q, vCmd, success = self.ik_solver.solve(
+            raw_q, v_Cmd, success = self.ik_solver.solve(
                 self.target_pos_l, self.target_rot_l, 
                 self.target_pos_r, self.target_rot_r, 
-                self.lastSolvedQ
+                self.last_solved_q
             )
             
-            self.smoothFilter.add_data(raw_q)
-            qCmd = self.smoothFilter.filtered_data
-            self.lastSolvedQ = qCmd
+            self.smooth_filter.add_data(raw_q)
+            qCmd = self.smooth_filter.filtered_data
+            self.last_solved_q = qCmd
 
             # Send commands
             for name, motorId in JOINT_MAP.items():
@@ -173,8 +176,8 @@ class G1VRController(Node):
                         self.cmd.motor_cmd[motorId].kd = 1   
 
             self.cmd.mode_pr = 1
-            with self.motorDataLock:
-                self.cmd.mode_machine = self.modeMachine
+            with self.motor_data_lock:
+                self.cmd.mode_machine = self.mode_machine
             
             self.cmd.crc = self.crc.Crc(self.cmd)
             self.pub.Write(self.cmd)
@@ -184,7 +187,9 @@ class G1VRController(Node):
             for i in range(35):
                 self.cmd.motor_cmd[i].mode = 0x01 
                 self.cmd.motor_cmd[i].q = 0.0
-                self.cmd.motor_cmd[i].kp, self.cmd.motor_cmd[i].dq, self.cmd.motor_cmd[i].tau = 0.0, 0.0, 0.0
+                self.cmd.motor_cmd[i].kp = 0.0
+                self.cmd.motor_cmd[i].dq = 0.0
+                self.cmd.motor_cmd[i].tau = 0.0
                 self.cmd.motor_cmd[i].kd = 1.0    
             self.cmd.crc = self.crc.Crc(self.cmd)
             self.pub.Write(self.cmd)

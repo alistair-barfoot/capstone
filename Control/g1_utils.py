@@ -17,7 +17,7 @@ class MotorData:
 
 class G1Motors:
     def __init__(self):
-        self.motorData = [MotorData() for _ in range(35)]
+        self.motor_data = [MotorData() for _ in range(35)]
 
 class WeightedMovingFilter:
     def __init__(self, weights, window_size):
