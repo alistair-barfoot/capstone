@@ -2,6 +2,7 @@ import time
 import copy
 import numpy as np
 import threading
+import sys
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
@@ -12,7 +13,7 @@ from ament_index_python.packages import get_package_share_directory
 # Unitree SDK
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize, ChannelSubscriber
 from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_, unitree_hg_msg_dds__HandCmd_
-from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_ as hg_LowCmd, LowState_ as hg_LowState, HandCmd_ as hg_HandCmd
+from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_ as hg_LowCmd, LowState_ as hg_LowState, HandCmd_ as hg_HandCmd, HandState_ as hg_HandState
 from unitree_sdk2py.utils.crc import CRC
 from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 
@@ -39,7 +40,12 @@ class G1VRController(Node):
         self.hand_state = {"left": True, "right": True}
         self.current_hand_state = {"left": False, "right": False}
 
-        # Subscribers
+        self.finger_pos = {"left": [0.0]*7, "right": [0.0]*7}
+        self.torque_cur = {"left": [0.0]*7, "right": [0.0]*7}
+        self.torque_prev = {"left": [0.0]*7, "right": [0.0]*7}
+        self.overTorque = False
+        self.torque_limit = 5e4
+        # ROS2 Subscribers
         self.create_subscription(PoseStamped, '/pos_rot_left', lambda msg: self.arm_callback(msg, True), 10)
         self.create_subscription(Bool, '/pos_rot_left_status', lambda msg: self.grip_callback(msg, "left"), 10)
         self.create_subscription(PoseStamped, '/pos_rot_right', lambda msg: self.arm_callback(msg, False), 10)
@@ -83,6 +89,21 @@ class G1VRController(Node):
         self.right_hand_pub = ChannelPublisher("rt/dex3/right/cmd", hg_HandCmd)
         self.right_hand_pub.Init()
         self.right_hand_cmd = unitree_hg_msg_dds__HandCmd_()
+        
+        self.left_hand_sub = ChannelSubscriber("rt/dex3/left/state", hg_HandState)
+        self.left_hand_sub.Init(lambda msg: self.torque_callback(msg, "left"), 10)
+
+        self.right_hand_sub = ChannelSubscriber("rt/dex3/right/state", hg_HandState)
+        self.right_hand_sub.Init(lambda msg: self.torque_callback(msg, "right"), 10)
+
+    def torque_callback(self, msg: hg_HandState, side: str):
+        if msg is None or not msg.motor_state:
+            return
+            
+        # The Dex3 hand has 7 motors. We extract tau_est from each.
+        # Rounding to 2 decimal places keeps the terminal clean and prevents scrolling.
+        self.torque_cur[side] = [round(motor.tau_est, 2) for motor in msg.motor_state[:7]]
+        self.finger_pos[side] = [motor.q for motor in msg.motor_state[:7]]
 
     def arm_callback(self, msg, left):
         pos = np.array([msg.pose.position.y, msg.pose.position.x * -1.0, (msg.pose.position.z * -1.0) + 0.55])
@@ -109,26 +130,47 @@ class G1VRController(Node):
                 self.mode_machine = msg.mode_machine
             self.first_read = False
 
-    def control_hand(self, side, is_open):
-        cmd = self.left_hand_cmd if side == "left" else self.right_hand_cmd
-        pub = self.left_hand_pub if side == "left" else self.right_hand_pub
-        
-        if is_open:
-            target_pos = [0, 0, 0, 0, 0, 0, 0]
-        else:
-            target_pos = [0, 0, 1.75, -1.57, -1.75, -1.57, -1.75] if side == "left" else [0, 0, -1.75, 1.57, 1.57, 1.57, 1.57]
-            
-        for i in range(7):
-            cmd.motor_cmd[i].mode = 1
-            cmd.motor_cmd[i].q = target_pos[i]
-            cmd.motor_cmd[i].dq = 0.0
-            cmd.motor_cmd[i].kp = 20.0
-            cmd.motor_cmd[i].kd = 1.0
-            cmd.motor_cmd[i].tau = 0.0
-            
-        pub.Write(cmd)
-        #self.get_logger().info(f"Dex3 {side} hand commanded to {'OPEN' if is_open else 'CLOSE'}")
+    def control_hand(self):
+        if self.overTorque:
+            print("Over-TORQUED")
+        for side in ["left", "right"]:
+            cmd = self.left_hand_cmd if side == "left" else self.right_hand_cmd
+            pub = self.left_hand_pub if side == "left" else self.right_hand_pub
+            for torque_cur,torque_prev in zip(self.torque_cur[side],self.torque_prev[side]):
+                if(abs(torque_cur - torque_prev) > self.torque_limit):
+                    
+                    self.overTorque = True
+                    target_pos = self.finger_pos[side]
+                    for i in range(7):
+                        cmd.motor_cmd[i].mode = 1
+                        cmd.motor_cmd[i].q = target_pos[i]
+                        cmd.motor_cmd[i].dq = 0.0
+                        cmd.motor_cmd[i].kp = 20.0
+                        cmd.motor_cmd[i].kd = 1.0
+                        cmd.motor_cmd[i].tau = 0.0
 
+            if self.hand_state[side] != self.current_hand_state[side]:
+                to_open = self.hand_state[side]
+                self.current_hand_state[side] = self.hand_state[side]
+                if to_open and self.overTorque:
+                    self.overTorque = False
+
+                #assume open, change if not
+                target_pos = [0, 0, 0, 0, 0, 0, 0]
+                if not to_open and not self.overTorque:
+                    target_pos = [0, 0, 1.75, -1.57, -1.75, -1.57, -1.75] if side == "left" else [0, 0, -1.75, 1.57, 1.57, 1.57, 1.57]
+                
+                for i in range(7):
+                    cmd.motor_cmd[i].mode = 1
+                    cmd.motor_cmd[i].q = target_pos[i]
+                    cmd.motor_cmd[i].dq = 0.0
+                    cmd.motor_cmd[i].kp = 20.0
+                    cmd.motor_cmd[i].kd = 1.0
+                    cmd.motor_cmd[i].tau = 0.0
+
+                pub.Write(cmd)
+                self.get_logger().info(f"Dex3 {side} hand commanded to {'OPEN' if to_open else 'CLOSE'}")
+    
     def controlLoop(self):
         if self.first_read:
             self.get_logger().info("WAITING TO SUBSCRIBE HAND DATA")
@@ -148,11 +190,7 @@ class G1VRController(Node):
             return
 
         try:
-            # Handle grippers dynamically for both sides
-            for side in ["left", "right"]:
-                if self.hand_state[side] != self.current_hand_state[side]:
-                    self.control_hand(side, self.hand_state[side])
-                    self.current_hand_state[side] = self.hand_state[side]
+            self.control_hand()
 
             # Solve IK for both arms
             raw_q, v_Cmd, success = self.ik_solver.solve(
@@ -181,7 +219,7 @@ class G1VRController(Node):
             
             self.cmd.crc = self.crc.Crc(self.cmd)
             self.pub.Write(self.cmd)
-    
+            print(f"L Torque: {self.torque_cur['left']}")
         except (KeyboardInterrupt, RuntimeError) as e:
             print(f"\n[Interrupt/Error] Exiting cleanly... {e}")
             for i in range(35):

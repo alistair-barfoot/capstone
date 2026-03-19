@@ -77,10 +77,11 @@ class DualArmIKSolver:
         self.param_q_last = self.opti.parameter(self.model.nq) 
         self.param_neutral = self.opti.parameter(self.model.nq)
         
-        self.opti.set_value(self.param_neutral,[ 8.39828998e-02,  2.80442294e-02,  2.97575742e-02,  1.03259480e+00,
+        self.opti.set_value(self.param_neutral,[8.39828998e-02,  2.80442294e-02,  2.97575742e-02,  1.03259480e+00,
                                                -2.21307400e-05,  1.26232252e-01, -2.62358430e-04,  8.39352757e-02,
                                                -3.02904937e-02, -2.99052037e-02,  1.03319776e+00,  3.11785057e-04,
-                                                1.26131579e-01,  3.66911350e-04,]) 
+                                                1.26131579e-01,  3.66911350e-04,])
+        
         cost_trans = casadi.sumsqr(trans_err_L_fn(self.varQ, self.param_tf_target_L)) + casadi.sumsqr(trans_err_R_fn(self.varQ, self.param_tf_target_R))
         cost_rot = casadi.sumsqr(rot_err_L_fn(self.varQ, self.param_tf_target_L)) + casadi.sumsqr(rot_err_R_fn(self.varQ, self.param_tf_target_R))
         
