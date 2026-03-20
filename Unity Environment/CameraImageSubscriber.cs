@@ -72,6 +72,18 @@ public class CameraImageSubscriberDebug : MonoBehaviour
     void Start()
     {
         Debug.Log("=== Compressed Camera Image Subscriber Starting ===");
+        
+        // Reset message count to ensure proper calibration on restart
+        messageCount = 0;
+        rosTimestampValid = false;
+        timeOffsetCalculated = false;
+        calibrationOffsets.Clear();
+        
+        minLatencyMs = float.MaxValue;
+        maxLatencyMs = 0f;
+        avgLatencyMs = 0f;
+        latencySum = 0.0;
+        latencyCount = 0;
 
         if (displayRenderer == null)
         {
@@ -177,14 +189,18 @@ public class CameraImageSubscriberDebug : MonoBehaviour
     void ProcessCompressedImage(CompressedImageMsg compressedMsg)
     {
         messageCount++;
+        Debug.Log($"FRAME RECEIVED: #{messageCount}, Size={compressedMsg.data.Length} bytes");
 
         frameReceiveTime = GetCurrentTimeSeconds();
 
         if (enableLatencyMeasurement)
         {
+            Debug.Log($"LATENCY MEASUREMENT CHECK: enableLatencyMeasurement={enableLatencyMeasurement}");
             double rosTimestampSec = compressedMsg.header.stamp.sec;
             double rosTimestampNsec = compressedMsg.header.stamp.nanosec;
             double rosTimestamp = rosTimestampSec + (rosTimestampNsec / 1e9);
+
+            Debug.Log($"TIMESTAMP DEBUG: Frame {messageCount}, ROS={rosTimestamp:F6}, Sec={rosTimestampSec}, Nsec={rosTimestampNsec}");
 
             frameCaptureTime = rosTimestamp;
 
@@ -215,6 +231,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                     latencyDebugStatus = $"Calibrating (0/{calibrationSamples})...";
                     
                     Debug.Log("  ROS timestamp valid. Starting calibration...");
+                    Debug.Log($"  rosTimestampValid={rosTimestampValid}, timeOffsetCalculated={timeOffsetCalculated}, calibrationOffsets.Count={calibrationOffsets.Count}");
                 }
             }
 
@@ -225,6 +242,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                 calibrationOffsets.Add(offset);
 
                 latencyDebugStatus = $"Calibrating ({calibrationOffsets.Count}/{calibrationSamples})...";
+                Debug.Log($"CALIBRATING: Frame {messageCount}, Samples {calibrationOffsets.Count}/{calibrationSamples}, Offset={offset*1000:F2}ms");
 
                 if (calibrationOffsets.Count == calibrationSamples)
                 {
@@ -376,6 +394,9 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                 }
 
                 avgLatencyMs = (float)(latencySum / latencyCount);
+
+                // Log latency every frame for debugging
+                Debug.Log($"LATENCY: Total={currentLatencyMs:F1}ms | Net={networkLatencyMs:F1}ms | Decomp={decompressionLatencyMs:F1}ms | Render={renderLatencyMs:F1}ms | Frame={messageCount}");
 
                 // Periodic latency breakdown
                 if (messageCount % 60 == 0)
