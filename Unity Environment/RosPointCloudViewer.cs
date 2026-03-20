@@ -32,11 +32,6 @@ public class RosDepthMeshViewer : MonoBehaviour
     [Tooltip("Limit how often the mesh is rebuilt. 0 = every new depth frame.")]
     public float updateInterval = 0.1f;
 
-    [Header("Smoothing")]
-    [Range(0.01f, 1f)]
-    [Tooltip("Lower = more smoothing, higher = more responsive.")]
-    public float positionLerp = 0.25f;
-
     [Header("Display")]
     public bool rebuildMesh = true;
 
@@ -56,7 +51,6 @@ public class RosDepthMeshViewer : MonoBehaviour
     private Color32[] colors;
     private int[] triangles;
 
-    private Vector3[] smoothedVertices;
     private bool[] validVertex;
 
     private int gridWidth = 0;
@@ -165,7 +159,6 @@ public class RosDepthMeshViewer : MonoBehaviour
             vertices = new Vector3[vertexCount];
             colors = new Color32[vertexCount];
             validVertex = new bool[vertexCount];
-            smoothedVertices = new Vector3[vertexCount];
 
             lastDepthWidth = width;
             lastDepthHeight = height;
@@ -204,14 +197,8 @@ public class RosDepthMeshViewer : MonoBehaviour
                 float x = (u - cx) * z / fx;
                 float y = (v - cy) * z / fy;
 
-                Vector3 newVertex = new Vector3(x, -y, z);
-
-                if (smoothedVertices[index] == Vector3.zero)
-                    smoothedVertices[index] = newVertex;
-                else
-                    smoothedVertices[index] = Vector3.Lerp(smoothedVertices[index], newVertex, positionLerp);
-
-                vertices[index] = smoothedVertices[index];
+                // Direct assignment (No smoothing)
+                vertices[index] = new Vector3(x, -y, z);
                 validVertex[index] = true;
 
                 float t = Mathf.InverseLerp(minDepthMeters, maxDepthMeters, z);
@@ -239,8 +226,9 @@ public class RosDepthMeshViewer : MonoBehaviour
                 int i01 = (gy + 1) * gridWidth + gx;
                 int i11 = (gy + 1) * gridWidth + (gx + 1);
 
-                TryAddTriangle(i00, i01, i10, ref triCount);
-                TryAddTriangle(i10, i01, i11, ref triCount);
+                // Clockwise winding order
+                TryAddTriangle(i00, i10, i01, ref triCount);
+                TryAddTriangle(i10, i11, i01, ref triCount);
             }
         }
 
@@ -252,9 +240,9 @@ public class RosDepthMeshViewer : MonoBehaviour
 
         mesh.Clear(false);
         mesh.vertices = vertices;
-        mesh.colors32 = colors;
+        mesh.colors32 = colors; // Still generated, just in case you need them later
         mesh.triangles = finalTriangles;
-        mesh.RecalculateNormals();
+        mesh.RecalculateNormals(); // Required for Standard Shader lighting
         mesh.RecalculateBounds();
     }
 
