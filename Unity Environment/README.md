@@ -132,7 +132,7 @@ Then run:
 ```bash
 cd ~/capstone_ws
 source install/setup.bash
-ros2 run realsense2_camera realsense2_camera_node
+ros2 run realsense2_camera realsense2_camera_node align_depth.enable:=true
 ```
 
 ### Expected behavior
