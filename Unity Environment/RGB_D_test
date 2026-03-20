@@ -7,9 +7,8 @@ using RosMessageTypes.Sensor;
 public class RosDepthMeshViewer : MonoBehaviour
 {
     [Header("ROS Topics")]
-    // Make sure this matches your newly aligned topic!
-    public string depthTopic = "/camera/aligned_depth_to_color/image_raw"; 
-    public string cameraInfoTopic = "/depth/camera_info";
+    public string depthTopic = "/camera/aligned_depth_to_color/image_raw";
+    public string cameraInfoTopic = "/color/camera_info";
 
     [Header("Depth Settings")]
     public float depthScale = 0.001f;
@@ -34,7 +33,7 @@ public class RosDepthMeshViewer : MonoBehaviour
 
     private Mesh mesh;
     private Vector3[] vertices;
-    private Vector2[] uvs; // NEW: UV array for texturing
+    private Vector2[] uvs;
     private int[] triangles;
     private bool[] validVertex;
 
@@ -47,13 +46,18 @@ public class RosDepthMeshViewer : MonoBehaviour
     void Start()
     {
         ros = ROSConnection.GetOrCreateInstance();
-        ros.Subscribe<ImageMsg>(depthTopic, DepthCallback);
+
+        // FORCED QoS: Best Effort for high-bandwidth depth data
+        var bestEffort = new RosMessages.Unity.UnityRosSettings.RosTopicSettings { 
+            Reliability = RosMessages.Unity.UnityRosSettings.RosTopicSettings.ReliabilitySetting.BestEffort 
+        };
+
+        ros.Subscribe<ImageMsg>(depthTopic, DepthCallback, bestEffort);
         ros.Subscribe<CameraInfoMsg>(cameraInfoTopic, CameraInfoCallback);
 
         mesh = new Mesh();
         mesh.name = "ROS Depth Mesh";
         mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
-
         GetComponent<MeshFilter>().mesh = mesh;
     }
 
@@ -102,21 +106,17 @@ public class RosDepthMeshViewer : MonoBehaviour
 
         int width = (int)depthMsg.width;
         int height = (int)depthMsg.height;
-        if (width <= 1 || height <= 1) return;
 
         int newGridWidth = Mathf.CeilToInt(width / (float)pixelStride);
         int newGridHeight = Mathf.CeilToInt(height / (float)pixelStride);
         int vertexCount = newGridWidth * newGridHeight;
 
-        bool dimensionsChanged = width != lastDepthWidth || height != lastDepthHeight || 
-                                 newGridWidth != gridWidth || newGridHeight != gridHeight;
-
-        if (dimensionsChanged || vertices == null || vertices.Length != vertexCount)
+        if (width != lastDepthWidth || height != lastDepthHeight || newGridWidth != gridWidth)
         {
             gridWidth = newGridWidth;
             gridHeight = newGridHeight;
             vertices = new Vector3[vertexCount];
-            uvs = new Vector2[vertexCount]; // Initialize UVs
+            uvs = new Vector2[vertexCount];
             validVertex = new bool[vertexCount];
             lastDepthWidth = width;
             lastDepthHeight = height;
@@ -152,8 +152,6 @@ public class RosDepthMeshViewer : MonoBehaviour
                 vertices[index] = new Vector3(x, -y, z) + vrOffset;
                 validVertex[index] = true;
 
-                // NEW: Calculate UV mapping. 
-                // Unity textures read from bottom to top, so we invert the V axis (1f - ...)
                 float uvX = (float)u / (width - 1);
                 float uvY = 1f - ((float)v / (height - 1));
                 uvs[index] = new Vector2(uvX, uvY);
@@ -165,7 +163,6 @@ public class RosDepthMeshViewer : MonoBehaviour
             triangles = new int[maxTriangleIndices];
 
         int triCount = 0;
-
         for (int gy = 0; gy < gridHeight - 1; gy++)
         {
             for (int gx = 0; gx < gridWidth - 1; gx++)
@@ -187,9 +184,9 @@ public class RosDepthMeshViewer : MonoBehaviour
 
         mesh.Clear(false);
         mesh.vertices = vertices;
-        mesh.uv = uvs; // Apply UVs to the mesh
+        mesh.uv = uvs;
         mesh.triangles = finalTriangles;
-        mesh.RecalculateBounds(); 
+        mesh.RecalculateBounds();
     }
 
     void TryAddTriangle(int a, int b, int c, ref int triCount)
@@ -200,9 +197,8 @@ public class RosDepthMeshViewer : MonoBehaviour
         float zb = vertices[b].z - vrOffset.z;
         float zc = vertices[c].z - vrOffset.z;
 
-        if (Mathf.Abs(za - zb) > maxEdgeDeltaMeters) return;
-        if (Mathf.Abs(za - zc) > maxEdgeDeltaMeters) return;
-        if (Mathf.Abs(zb - zc) > maxEdgeDeltaMeters) return;
+        if (Mathf.Abs(za - zb) > maxEdgeDeltaMeters || Mathf.Abs(za - zc) > maxEdgeDeltaMeters || Mathf.Abs(zb - zc) > maxEdgeDeltaMeters) 
+            return;
 
         triangles[triCount++] = a;
         triangles[triCount++] = b;
