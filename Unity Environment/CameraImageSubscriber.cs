@@ -204,61 +204,65 @@ public class CameraImageSubscriberDebug : MonoBehaviour
 
             frameCaptureTime = rosTimestamp;
 
-            if (messageCount == 1)
-            {
-                Debug.Log($"=== FIRST COMPRESSED FRAME ===");
-                Debug.Log($"  Format: {compressedMsg.format}");
-                Debug.Log($"  Compressed size: {compressedMsg.data.Length} bytes ({compressedMsg.data.Length / 1024f:F1} KB)");
-                Debug.Log($"  ROS stamp: {rosTimestampSec}.{rosTimestampNsec:D9} (combined {rosTimestamp:F6})");
-                Debug.Log($"  Unity receive time: {frameReceiveTime:F6}");
-
-                if (rosTimestamp <= 0)
+                // Validate timestamp for any frame if not already validated
+                if (!rosTimestampValid)
                 {
-                    Debug.LogError("  ROS TIMESTAMP INVALID (<=0). Latency stats will be disabled.");
-                    rosTimestampValid = false;
-                    latencyDebugStatus = "ERROR: ROS timestamp invalid";
+                    if (rosTimestamp <= 0)
+                    {
+                        Debug.LogError($"  ROS TIMESTAMP INVALID (<=0) at frame {messageCount}. Latency stats will be disabled.");
+                        rosTimestampValid = false;
+                        latencyDebugStatus = "ERROR: ROS timestamp invalid";
+                    }
+                    else
+                    {
+                        firstRosTimestamp = rosTimestamp;
+                        rosTimestampValid = true;
+
+                        usingMonotonicTime = rosTimestamp < 1000000000;
+
+                        calibrationOffsets.Clear();
+                        timeOffsetCalculated = false;
+
+                        latencyDebugStatus = $"Calibrating (0/{calibrationSamples})...";
+                        
+                        Debug.Log($"  ROS timestamp valid at frame {messageCount}. Starting calibration...");
+                        Debug.Log($"  rosTimestampValid={rosTimestampValid}, timeOffsetCalculated={timeOffsetCalculated}, calibrationOffsets.Count={calibrationOffsets.Count}");
+                    }
                 }
-                else
+
+                if (messageCount == 1)
                 {
-                    firstRosTimestamp = rosTimestamp;
-                    rosTimestampValid = true;
-
-                    usingMonotonicTime = rosTimestamp < 1000000000;
-
-                    calibrationOffsets.Clear();
-                    timeOffsetCalculated = false;
-
-                    latencyDebugStatus = $"Calibrating (0/{calibrationSamples})...";
-                    
-                    Debug.Log("  ROS timestamp valid. Starting calibration...");
-                    Debug.Log($"  rosTimestampValid={rosTimestampValid}, timeOffsetCalculated={timeOffsetCalculated}, calibrationOffsets.Count={calibrationOffsets.Count}");
+                    Debug.Log($"=== FIRST COMPRESSED FRAME ===");
+                    Debug.Log($"  Format: {compressedMsg.format}");
+                    Debug.Log($"  Compressed size: {compressedMsg.data.Length} bytes ({compressedMsg.data.Length / 1024f:F1} KB)");
+                    Debug.Log($"  ROS stamp: {rosTimestampSec}.{rosTimestampNsec:D9} (combined {rosTimestamp:F6})");
+                    Debug.Log($"  Unity receive time: {frameReceiveTime:F6}");
                 }
-            }
 
-            if (rosTimestampValid && !timeOffsetCalculated && calibrationOffsets.Count < calibrationSamples)
-            {
-                double offset = frameReceiveTime - frameCaptureTime;
-
-                calibrationOffsets.Add(offset);
-
-                latencyDebugStatus = $"Calibrating ({calibrationOffsets.Count}/{calibrationSamples})...";
-                Debug.Log($"CALIBRATING: Frame {messageCount}, Samples {calibrationOffsets.Count}/{calibrationSamples}, Offset={offset*1000:F2}ms");
-
-                if (calibrationOffsets.Count == calibrationSamples)
+                if (rosTimestampValid && !timeOffsetCalculated && calibrationOffsets.Count < calibrationSamples)
                 {
-                    calibrationOffsets.Sort();
+                    double offset = frameReceiveTime - frameCaptureTime;
 
-                    rosToUnityTimeOffset = calibrationOffsets[calibrationSamples / 2];
+                    calibrationOffsets.Add(offset);
 
-                    timeOffsetCalculated = true;
-                    latencyDebugStatus = "Measuring latency";
+                    latencyDebugStatus = $"Calibrating ({calibrationOffsets.Count}/{calibrationSamples})...";
+                    Debug.Log($"CALIBRATING: Frame {messageCount}, Samples {calibrationOffsets.Count}/{calibrationSamples}, Offset={offset*1000:F2}ms");
 
-                    Debug.Log($"╔════════════════════════════════════════╗");
-                    Debug.Log($"║  TIME CALIBRATION COMPLETE          ║");
-                    Debug.Log($"╚════════════════════════════════════════╝");
-                    Debug.Log($"  Offset: {rosToUnityTimeOffset * 1000:F2} ms");
+                    if (calibrationOffsets.Count == calibrationSamples)
+                    {
+                        calibrationOffsets.Sort();
+
+                        rosToUnityTimeOffset = calibrationOffsets[calibrationSamples / 2];
+
+                        timeOffsetCalculated = true;
+                        latencyDebugStatus = "Measuring latency";
+
+                        Debug.Log($"╔════════════════════════════════════════╗");
+                        Debug.Log($"║  TIME CALIBRATION COMPLETE          ║");
+                        Debug.Log($"╚════════════════════════════════════════╝");
+                        Debug.Log($"  Offset: {rosToUnityTimeOffset * 1000:F2} ms");
+                    }
                 }
-            }
 
             if (timeOffsetCalculated && rosTimestampValid)
             {
@@ -340,6 +344,56 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                 Debug.Log($"   Compression ratio: {ratio:F1}x");
             }
 
+            Debug.Log($"EnableLatencyMeasurement={enableLatencyMeasurement}, timeOffsetCalculated={timeOffsetCalculated}, rosTimestampValid={rosTimestampValid}");
+
+            // ========== CALCULATE LATENCY IMMEDIATELY AFTER PROCESSING ==========
+            if (enableLatencyMeasurement && timeOffsetCalculated && rosTimestampValid)
+            {
+                frameDisplayTime = GetCurrentTimeSeconds();
+                renderLatencyMs = (float)((frameDisplayTime - frameProcessTime) * 1000.0);
+                
+                double totalLatency = frameDisplayTime - frameCaptureTime - rosToUnityTimeOffset;
+                currentLatencyMs = (float)(totalLatency * 1000.0);
+
+                Debug.Log($"ROS TimestampValid: {rosTimestampValid}");
+
+                if (currentLatencyMs > 0 && currentLatencyMs < 60000)
+                {
+                    minLatencyMs = Mathf.Min(minLatencyMs, currentLatencyMs);
+                    maxLatencyMs = Mathf.Max(maxLatencyMs, currentLatencyMs);
+
+                    latencySum += currentLatencyMs;
+                    latencyCount++;
+
+                    if (latencyCount > latencySampleSize)
+                    {
+                        latencySum *= 0.5;
+                        latencyCount = latencySampleSize / 2;
+                    }
+
+                    avgLatencyMs = (float)(latencySum / latencyCount);
+
+                    // Log latency every frame for debugging
+                    Debug.Log($"LATENCY: Total={currentLatencyMs:F1}ms | Net={networkLatencyMs:F1}ms | Decomp={decompressionLatencyMs:F1}ms | Render={renderLatencyMs:F1}ms | Frame={messageCount}");
+
+                    // Periodic latency breakdown
+                    if (messageCount % 60 == 0)
+                    {
+                        Debug.Log($"╔════════════════════════════════════════╗");
+                        Debug.Log($"║  LATENCY BREAKDOWN (Compressed)        ║");
+                        Debug.Log($"╚════════════════════════════════════════╝");
+                        Debug.Log($"  Total Latency:         {currentLatencyMs:F2} ms");
+                        Debug.Log($"  Network Latency:       {networkLatencyMs:F2} ms");
+                        Debug.Log($"  Decompression Latency: {decompressionLatencyMs:F2} ms");
+                        Debug.Log($"  Render Latency:        {renderLatencyMs:F2} ms");
+                        Debug.Log($"  ────────────────────────────────────────");
+                        Debug.Log($"  Min: {minLatencyMs:F2} ms");
+                        Debug.Log($"  Avg: {avgLatencyMs:F2} ms");
+                        Debug.Log($"  Max: {maxLatencyMs:F2} ms");
+                    }
+                }
+            }
+
             // Periodic compression stats
             if (messageCount % 60 == 0)
             {
@@ -364,62 +418,10 @@ public class CameraImageSubscriberDebug : MonoBehaviour
         }
     }
 
-    void LateUpdate()
-    {
-        if (!enableLatencyMeasurement || messageCount == 0)
-            return;
-
-        frameDisplayTime = GetCurrentTimeSeconds();
-
-        if (timeOffsetCalculated && rosTimestampValid)
-        {
-            double totalLatency = frameDisplayTime - frameCaptureTime - rosToUnityTimeOffset;
-
-            currentLatencyMs = (float)(totalLatency * 1000.0);
-
-            renderLatencyMs = (float)((frameDisplayTime - frameProcessTime) * 1000.0);
-
-            if (currentLatencyMs > 0 && currentLatencyMs < 60000)
-            {
-                minLatencyMs = Mathf.Min(minLatencyMs, currentLatencyMs);
-                maxLatencyMs = Mathf.Max(maxLatencyMs, currentLatencyMs);
-
-                latencySum += currentLatencyMs;
-                latencyCount++;
-
-                if (latencyCount > latencySampleSize)
-                {
-                    latencySum *= 0.5;
-                    latencyCount = latencySampleSize / 2;
-                }
-
-                avgLatencyMs = (float)(latencySum / latencyCount);
-
-                // Log latency every frame for debugging
-                Debug.Log($"LATENCY: Total={currentLatencyMs:F1}ms | Net={networkLatencyMs:F1}ms | Decomp={decompressionLatencyMs:F1}ms | Render={renderLatencyMs:F1}ms | Frame={messageCount}");
-
-                // Periodic latency breakdown
-                if (messageCount % 60 == 0)
-                {
-                    Debug.Log($"╔════════════════════════════════════════╗");
-                    Debug.Log($"║  LATENCY BREAKDOWN (Compressed)        ║");
-                    Debug.Log($"╚════════════════════════════════════════╝");
-                    Debug.Log($"  Total Latency:         {currentLatencyMs:F2} ms");
-                    Debug.Log($"  Network Latency:       {networkLatencyMs:F2} ms");
-                    Debug.Log($"  Decompression Latency: {decompressionLatencyMs:F2} ms");
-                    Debug.Log($"  Render Latency:        {renderLatencyMs:F2} ms");
-                    Debug.Log($"  ────────────────────────────────────────");
-                    Debug.Log($"  Min: {minLatencyMs:F2} ms");
-                    Debug.Log($"  Avg: {avgLatencyMs:F2} ms");
-                    Debug.Log($"  Max: {maxLatencyMs:F2} ms");
-                }
-            }
-        }
-    }
-
     private double GetCurrentTimeSeconds()
     {
-        return Time.realtimeSinceStartupAsDouble;
+        // Use Unix epoch time to match ROS timestamps
+        return (System.DateTime.UtcNow - new System.DateTime(1970, 1, 1)).TotalSeconds;
     }
 
     void OnGUI()
