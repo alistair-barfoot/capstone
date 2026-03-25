@@ -84,6 +84,10 @@ public class HandTipHUD : MonoBehaviour
     private float handProcessingLatencyMs = 0f;
     private float rosPublishingLatencyMs = 0f;
     
+    // ROS Message History
+    private PoseStampedMsg prevLeftPoseStamped = new PoseStampedMsg();
+    private PoseStampedMsg prevRightPoseStamped = new PoseStampedMsg();
+
     private string latencyDebugStatus = "Waiting for hand tracking data...";
 
     XRHandSubsystem _hands;
@@ -239,6 +243,7 @@ public class HandTipHUD : MonoBehaviour
         {
             timeSinceCalibrate = 0f;
             userArmLength = leftJoints.z;
+            if (userArmLength < 0.2f) userArmLength = 0.2f;
             //leftJoints.z = 0;
             Debug.Log("HTHUD: Hand shape detected (gesture active)");
         }
@@ -298,6 +303,16 @@ public class HandTipHUD : MonoBehaviour
                 orientation = new QuaternionMsg(leftRot.x, leftRot.z, -leftRot.y, -leftRot.w)
             }
         };
+
+        if (_hands.leftHand.isTracked)
+        {
+            prevLeftPoseStamped = leftPoseStamped; // Update history only if currently tracked
+        }
+        else
+        {
+            leftPoseStamped.pose = prevLeftPoseStamped.pose; // Use last known pose if not currently tracked
+        }
+
         ros.Publish(topicName + "_left", leftPoseStamped);
 
         var leftHandStatus = new BoolMsg { data = _openHandActiveLeft };
@@ -312,6 +327,16 @@ public class HandTipHUD : MonoBehaviour
                 orientation = new QuaternionMsg(rightRot.x, rightRot.z, -rightRot.y, -rightRot.w)
             }
         };
+
+        if (_hands.rightHand.isTracked)
+        {
+            prevRightPoseStamped = rightPoseStamped; // Update history only if currently tracked
+        }
+        else
+        {
+            rightPoseStamped.pose = prevRightPoseStamped.pose; // Use last known pose if not currently tracked
+        }
+
         ros.Publish(topicName + "_right", rightPoseStamped);
 
         var rightHandStatus = new BoolMsg { data = _openHandActiveRight };
