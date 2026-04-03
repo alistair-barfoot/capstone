@@ -5,6 +5,7 @@ using System.Collections.Generic;
 
 public class CameraImageSubscriberDebug : MonoBehaviour
 {
+    // Image topic
     public string imageTopic = "/color/image_raw/compressed";
     public Renderer displayRenderer;
 
@@ -18,7 +19,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
     [SerializeField] private int minTargetFps = 10;
     [SerializeField] private int maxTargetFps = 120;
 
-    // ========== LATENCY MEASUREMENT ==========
+    // Latency measurement variables
     [Header("Latency Measurement")]
     [SerializeField] private bool enableLatencyMeasurement = true;
     [SerializeField] private int latencySampleSize = 100;
@@ -43,9 +44,10 @@ public class CameraImageSubscriberDebug : MonoBehaviour
     private double frameDisplayTime = 0.0;
 
     private float networkLatencyMs = 0f;
-    private float decompressionLatencyMs = 0f; // Changed from processingLatencyMs
+    private float decompressionLatencyMs = 0f;
     private float renderLatencyMs = 0f;
 
+    // Ros timestamp validation
     private string latencyDebugStatus = "Waiting for data...";
     private bool rosTimestampValid = false;
     private double firstRosTimestamp = -1.0;
@@ -56,7 +58,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
     private long totalUncompressedBytes = 0;
     private int compressionStatsCount = 0;
 
-    // Optional drop policy
+    // Drop policy
     [Header("Drop Policy")]
     [SerializeField] private bool dropStaleFrames = true;
     [SerializeField] private float maxAcceptableTotalLatencyMs = 300f;
@@ -79,12 +81,14 @@ public class CameraImageSubscriberDebug : MonoBehaviour
         timeOffsetCalculated = false;
         calibrationOffsets.Clear();
         
+        // Reset latency stats
         minLatencyMs = float.MaxValue;
         maxLatencyMs = 0f;
         avgLatencyMs = 0f;
         latencySum = 0.0;
         latencyCount = 0;
 
+        // Find Renderer if not assigned
         if (displayRenderer == null)
         {
             displayRenderer = GetComponent<Renderer>();
@@ -99,9 +103,9 @@ public class CameraImageSubscriberDebug : MonoBehaviour
 
         Debug.Log($"  Renderer found: {displayRenderer.gameObject.name}");
 
-        // TEST texture (red)
+        // Debug texture to confirm setup before images arrive
+        // Set image to be all red
         Debug.Log("TEST: Applying RED test texture...");
-
         Texture2D redTexture = new Texture2D(256, 256, TextureFormat.RGB24, false);
         Color[] redPixels = new Color[256 * 256];
 
@@ -113,6 +117,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
 
         Shader unlitShader = Shader.Find("Unlit/Texture");
 
+        // Warning if shader not found, but still apply texture to see if it works
         if (unlitShader == null)
         {
             Debug.LogWarning("  Unlit/Texture shader not found, using existing material");
@@ -126,7 +131,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
 
         testTextureApplied = true;
 
-        // Remove vertical flip (right-side up)
+        // Vertical flip
         displayRenderer.material.mainTextureScale = new Vector2(1f, 1f);
         displayRenderer.material.mainTextureOffset = new Vector2(0f, 0f);
 
@@ -137,16 +142,16 @@ public class CameraImageSubscriberDebug : MonoBehaviour
             normal = { textColor = Color.yellow }
         };
 
+        // Initialize ROS connection and subscribe to compressed image topic
         ROSConnection ros = ROSConnection.GetOrCreateInstance();
-
         Debug.Log($"  ROS Connection: {ros.RosIPAddress}:{ros.RosPort}");
 
-        // Subscribe to CompressedImageMsg instead of ImageMsg
+        // Subscribe to CompressedImageMsg
         ros.Subscribe<CompressedImageMsg>(imageTopic, UpdateCameraImage);
-
         Debug.Log($"  Subscribed to COMPRESSED topic: {imageTopic}");
         Debug.Log("  === Waiting for ROS images (Quad should be RED while waiting) ===");
 
+        // Latency measurement setup
         if (enableLatencyMeasurement)
         {
             Debug.Log("=== LATENCY MEASUREMENT ENABLED (Compressed) ===");
@@ -171,6 +176,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
         // Process the latest image if available
         CompressedImageMsg imageToProcess = null;
         
+        // Access the latest image
         lock (imageLock)
         {
             if (hasNewImage && latestImageMsg != null)
@@ -186,6 +192,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
         }
     }
     
+    // Process compressed images
     void ProcessCompressedImage(CompressedImageMsg compressedMsg)
     {
         messageCount++;
@@ -193,8 +200,10 @@ public class CameraImageSubscriberDebug : MonoBehaviour
 
         frameReceiveTime = GetCurrentTimeSeconds();
 
+        // Latency measurement
         if (enableLatencyMeasurement)
         {
+            // Extract ROS timestamp
             Debug.Log($"LATENCY MEASUREMENT CHECK: enableLatencyMeasurement={enableLatencyMeasurement}");
             double rosTimestampSec = compressedMsg.header.stamp.sec;
             double rosTimestampNsec = compressedMsg.header.stamp.nanosec;
@@ -207,12 +216,14 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                 // Validate timestamp for any frame if not already validated
                 if (!rosTimestampValid)
                 {
+                    // Check for valid timestamp
                     if (rosTimestamp <= 0)
                     {
                         Debug.LogError($"  ROS TIMESTAMP INVALID (<=0) at frame {messageCount}. Latency stats will be disabled.");
                         rosTimestampValid = false;
                         latencyDebugStatus = "ERROR: ROS timestamp invalid";
                     }
+                    // Check for timestamps that look like monotonic time
                     else
                     {
                         firstRosTimestamp = rosTimestamp;
@@ -225,11 +236,13 @@ public class CameraImageSubscriberDebug : MonoBehaviour
 
                         latencyDebugStatus = $"Calibrating (0/{calibrationSamples})...";
                         
+                        // Log the timestamp validation and calibration start
                         Debug.Log($"  ROS timestamp valid at frame {messageCount}. Starting calibration...");
                         Debug.Log($"  rosTimestampValid={rosTimestampValid}, timeOffsetCalculated={timeOffsetCalculated}, calibrationOffsets.Count={calibrationOffsets.Count}");
                     }
                 }
 
+                // Debug message on first frame with timestamp
                 if (messageCount == 1)
                 {
                     Debug.Log($"=== FIRST COMPRESSED FRAME ===");
@@ -239,6 +252,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                     Debug.Log($"  Unity receive time: {frameReceiveTime:F6}");
                 }
 
+                // Perform time offset calibration using the first few frames with valid timestamps
                 if (rosTimestampValid && !timeOffsetCalculated && calibrationOffsets.Count < calibrationSamples)
                 {
                     double offset = frameReceiveTime - frameCaptureTime;
@@ -264,6 +278,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                     }
                 }
 
+            // Calculate network latency immediately upon receiving the frame
             if (timeOffsetCalculated && rosTimestampValid)
             {
                 double adjustedDiff = frameReceiveTime - frameCaptureTime - rosToUnityTimeOffset;
@@ -278,12 +293,15 @@ public class CameraImageSubscriberDebug : MonoBehaviour
             }
         }
 
+        // Update frame timing
         float now = Time.realtimeSinceStartup;
 
+        // Dynamic frame rate adjustment based on image arrival rate
         if (lastImageTime > 0f)
         {
             float delta = now - lastImageTime;
 
+            // Smooth the delta time
             if (delta > 0f)
             {
                 smoothedDeltaTime = smoothedDeltaTime < 0f
@@ -305,7 +323,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
         {
             double processStartTime = GetCurrentTimeSeconds();
 
-            // Create texture if needed (will be resized by LoadImage)
+            // Create texture if needed
             if (cameraTexture == null)
             {
                 cameraTexture = new Texture2D(2, 2, TextureFormat.RGB24, false);
@@ -333,6 +351,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
             totalCompressedBytes += compressedMsg.data.Length;
             totalUncompressedBytes += cameraTexture.width * cameraTexture.height * 3; // RGB24
 
+            // Log details on the first frame
             if (messageCount == 1)
             {
                 Debug.Log($"First image decompressed successfully:");
@@ -344,21 +363,26 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                 Debug.Log($"   Compression ratio: {ratio:F1}x");
             }
 
+            // Print debug info for latency measurement
             Debug.Log($"EnableLatencyMeasurement={enableLatencyMeasurement}, timeOffsetCalculated={timeOffsetCalculated}, rosTimestampValid={rosTimestampValid}");
 
-            // ========== CALCULATE LATENCY IMMEDIATELY AFTER PROCESSING ==========
+            // Calculate latency if we have a valid timestamp and time offset
             if (enableLatencyMeasurement && timeOffsetCalculated && rosTimestampValid)
             {
+                // Calculate render latency just before displaying the frame
                 frameDisplayTime = GetCurrentTimeSeconds();
                 renderLatencyMs = (float)((frameDisplayTime - frameProcessTime) * 1000.0);
                 
+                // Total latency from capture to display, adjusted for clock offset
                 double totalLatency = frameDisplayTime - frameCaptureTime - rosToUnityTimeOffset;
                 currentLatencyMs = (float)(totalLatency * 1000.0);
 
                 Debug.Log($"ROS TimestampValid: {rosTimestampValid}");
 
+                // Update latency stats
                 if (currentLatencyMs > 0 && currentLatencyMs < 60000)
                 {
+                    // Min and max latency
                     minLatencyMs = Mathf.Min(minLatencyMs, currentLatencyMs);
                     maxLatencyMs = Mathf.Max(maxLatencyMs, currentLatencyMs);
 
@@ -376,7 +400,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                     // Log latency every frame for debugging
                     Debug.Log($"LATENCY: Total={currentLatencyMs:F1}ms | Net={networkLatencyMs:F1}ms | Decomp={decompressionLatencyMs:F1}ms | Render={renderLatencyMs:F1}ms | Frame={messageCount}");
 
-                    // Periodic latency breakdown
+                    // Print latency stats every 60 frames
                     if (messageCount % 60 == 0)
                     {
                         Debug.Log($"╔════════════════════════════════════════╗");
@@ -394,7 +418,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                 }
             }
 
-            // Periodic compression stats
+            // Print compression stats every 60 frames
             if (messageCount % 60 == 0)
             {
                 float avgCompressedKB = (totalCompressedBytes / (float)compressionStatsCount) / 1024f;
@@ -403,7 +427,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                 float bandwidthSaved = (1 - 1 / compressionRatio) * 100f;
 
                 Debug.Log($"╔════════════════════════════════════════╗");
-                Debug.Log($"║  COMPRESSION STATS ({compressionStatsCount} frames)");
+                Debug.Log($"║  COMPRESSION STATS ({compressionStatsCount} frames)        ║");
                 Debug.Log($"╚════════════════════════════════════════╝");
                 Debug.Log($"  Avg compressed: {avgCompressedKB:F1} KB/frame");
                 Debug.Log($"  Avg uncompressed: {avgUncompressedKB:F1} KB/frame");
@@ -434,18 +458,20 @@ public class CameraImageSubscriberDebug : MonoBehaviour
         guiStyle.fontSize = 28;
         guiStyle.normal.textColor = Color.yellow;
 
+        // Display topic and message count
         GUI.Label(new Rect(10, yOffset, 1400, lineHeight), $"Topic: {imageTopic} (COMPRESSED)", guiStyle);
         yOffset += lineHeight;
 
+        // Display message count
         GUI.Label(new Rect(10, yOffset, 1200, lineHeight), $"Frames: {messageCount}", guiStyle);
         yOffset += lineHeight;
 
+        // If no messages received yet, show waiting message
         if (testTextureApplied && messageCount == 0)
         {
             guiStyle.normal.textColor = Color.red;
             guiStyle.fontSize = 32;
 
-            GUI.Label(new Rect(10, yOffset, 1200, lineHeight), "QUAD SHOULD BE RED - IS IT?", guiStyle);
             yOffset += lineHeight;
             
             guiStyle.fontSize = 24;
@@ -454,6 +480,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
             return;
         }
 
+        // If messages are being received, show stats
         if (messageCount > 0)
         {
             guiStyle.normal.textColor = Color.green;
@@ -479,6 +506,7 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                 float avgCompressedKB = (totalCompressedBytes / (float)compressionStatsCount) / 1024f;
                 float compressionRatio = totalUncompressedBytes / (float)totalCompressedBytes;
 
+                // Color code based on compression ratio
                 guiStyle.normal.textColor = Color.cyan;
                 guiStyle.fontSize = 22;
                 GUI.Label(
@@ -530,6 +558,8 @@ public class CameraImageSubscriberDebug : MonoBehaviour
                         guiStyle
                     );
                 }
+
+                // If timestamp is invalid, show warning
                 else
                 {
                     guiStyle.normal.textColor = Color.yellow;
