@@ -2,6 +2,12 @@
 
 This repository contains the software stack, control algorithms, and simulation environments for our engineering capstone project: **VR Teleoperation of a Unitree G1 Humanoid Robot**. 
 
+<img src="Photos and Videos/pro live pipeline.JPG" width="700">
+
+*Live Teleoperation of the G1 Humanoid*
+
+Video of live teleoperation with headset view: https://www.youtube.com/watch?v=aiy3NT2tO8U
+
 ## Project Overview
 
 The primary goal of this capstone is to establish a low-latency, highly intuitive teleoperation pipeline that allows a human operator to control a Unitree G1 humanoid robot in real-time using Virtual Reality. By mapping the operator's head and hand movements from a VR headset to the robot's kinematics, we enable complex manipulation and environmental interaction capabilities.
