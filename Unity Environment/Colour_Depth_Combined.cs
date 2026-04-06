@@ -9,7 +9,7 @@ using RosMessageTypes.Sensor;
 public class RosUnifiedLowLatencyViewer : MonoBehaviour
 {
     [Header("ROS Topics")]
-    public string depthCompressedTopic = "/depth/image_raw/compressed"; // UPDATE THIS!
+    public string depthCompressedTopic = "/depth/image_raw/compressed"; // topics required
     public string colourCompressedTopic = "/colour/image_raw/compressed";
     public string cameraInfoTopic = "/depth/camera_info";
 
