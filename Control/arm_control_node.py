@@ -3,13 +3,16 @@ import copy
 import numpy as np
 import threading
 import sys
+import select
+import termios
+import tty
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool
 import pinocchio as pin
 from ament_index_python.packages import get_package_share_directory
-
+from enum import Enum
 # Unitree SDK
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize, ChannelSubscriber
 from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_, unitree_hg_msg_dds__HandCmd_
@@ -20,12 +23,16 @@ from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwi
 # Local imports
 from g1_utils import JOINT_MAP, G1Motors, WeightedMovingFilter
 from ik_solver import DualArmIKSolver
+class RobotState(Enum):
+    RUNNING = 1
+    RETURNING_HOME = 2
+    DONE = 3
 
 class G1VRController(Node):
     def __init__(self):
         super().__init__('g1_vr_controller')
 
-        # Dynamically find URDF in ROS 2 package
+        self.state = RobotState.RUNNING
         urdf_path = "./g1_29dof.urdf" #f"{get_package_share_directory('g1_vr_control')}/urdf/g1_29dof.urdf"
         self.dt = 0.002
         self.ik_solver = DualArmIKSolver(urdf_path, self.dt)
@@ -42,9 +49,9 @@ class G1VRController(Node):
 
         self.finger_pos = {"left": [0.0]*7, "right": [0.0]*7}
         self.torque_cur = {"left": [0.0]*7, "right": [0.0]*7}
-        self.torque_prev = {"left": [0.0]*7, "right": [0.0]*7}
-        self.overTorque = False
-        self.torque_limit = 5e4
+        self.overtorque_start_time = {"left": None, "right": None}
+        self.overtorque = {"left": False, "right": False}
+        self.torque_limit = 1e6
         # ROS2 Subscribers
         self.create_subscription(PoseStamped, '/pos_rot_left', lambda msg: self.arm_callback(msg, True), 10)
         self.create_subscription(Bool, '/pos_rot_left_status', lambda msg: self.grip_callback(msg, "left"), 10)
@@ -57,8 +64,15 @@ class G1VRController(Node):
         self.mode_machine = None
         self.first_read = True
         self.initialized = False
-        
+        self.quit = False
+        self.num_iter_to_home = 0
+
         self._setup_unitree()
+
+        # Start the keyboard listener thread for manual overrides
+        self.kb_thread = threading.Thread(target=self.keyboard_listener, daemon=True)
+        self.kb_thread.start()
+
         self.timer = self.create_timer(self.dt, self.controlLoop)
 
     def _setup_unitree(self):
@@ -99,9 +113,7 @@ class G1VRController(Node):
     def torque_callback(self, msg: hg_HandState, side: str):
         if msg is None or not msg.motor_state:
             return
-            
-        # The Dex3 hand has 7 motors. We extract tau_est from each.
-        # Rounding to 2 decimal places keeps the terminal clean and prevents scrolling.
+
         self.torque_cur[side] = [round(motor.tau_est, 2) for motor in msg.motor_state[:7]]
         self.finger_pos[side] = [motor.q for motor in msg.motor_state[:7]]
 
@@ -130,17 +142,77 @@ class G1VRController(Node):
                 self.mode_machine = msg.mode_machine
             self.first_read = False
 
+    def keyboard_listener(self):
+        print("\n=== Keyboard Commands ===")
+        print(" [Q] Go to home position and stop control")
+        print("===================================\n")
+        
+        old_settings = termios.tcgetattr(sys.stdin)
+        try:
+            tty.setcbreak(sys.stdin.fileno())
+            while rclpy.ok():
+                # Check for input every 0.1s
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    key = sys.stdin.read(1).lower()
+                    if key == 'q':
+                        if self.state == RobotState.RUNNING:
+                            self.get_logger().info("RETURNING HOME")
+                            self.state = RobotState.RETURNING_HOME
+                            self.num_iter_to_home = 0
+                        break
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
     def control_hand(self):
-        if self.overTorque:
-            print("Over-TORQUED")
+
         for side in ["left", "right"]:
             cmd = self.left_hand_cmd if side == "left" else self.right_hand_cmd
             pub = self.left_hand_pub if side == "left" else self.right_hand_pub
-            for torque_cur,torque_prev in zip(self.torque_cur[side],self.torque_prev[side]):
-                if(abs(torque_cur - torque_prev) > self.torque_limit):
+
+            publish_required = False
+
+            # Over-Torque Check
+            is_exceeding = any(abs(t) > self.torque_limit for t in self.torque_cur[side])
+
+            if is_exceeding and not self.hand_state[side]:
+                # Start the timer if it hasn't been started yet
+                if self.overtorque_start_time[side] is None:
+                    self.overtorque_start_time[side] = time.time()
+                
+                # Only trigger hold logic if 0.1 second has elapsed
+                elif time.time() - self.overtorque_start_time[side] >= 0.1:
+                    if not self.overtorque[side]:
+                        print(f"\n[{side.upper()}] Over-Torque Detected for >0.1s! Holding position.")
+                        self.overtorque[side] = True
                     
-                    self.overTorque = True
                     target_pos = self.finger_pos[side]
+                    for i in range(7):
+                        cmd.motor_cmd[i].mode = 1
+                        cmd.motor_cmd[i].q = target_pos[i]
+                        cmd.motor_cmd[i].dq = 0.0
+                        cmd.motor_cmd[i].kp = 15.0
+                        cmd.motor_cmd[i].kd = 1.0
+                        cmd.motor_cmd[i].tau = 0.0
+                    publish_required = True
+            else:
+                # Reset the timer if torque drops below limit or user commands hand to open
+                self.overtorque_start_time[side] = None
+
+            #State Change Check (User Input)
+            if self.hand_state[side] != self.current_hand_state[side]:
+                to_open = self.hand_state[side]
+                self.current_hand_state[side] = to_open
+                
+                # Reset over-torque only if the user is commanding the hand to OPEN
+                if to_open and self.overtorque[side]:
+                    self.overtorque[side] = False
+
+                # Only command the new position if we aren't currently over-torqued
+                if not self.overtorque[side]:
+                    target_pos = [0.0] * 7 # Default Open
+                    if not to_open: # Close
+                        target_pos = [0, 0, 1.75, -1.57, -1.75, -1.57, -1.75] if side == "left" else [0, 0, -1.75, 1.57, 1.57, 1.57, 1.57]
+                    
                     for i in range(7):
                         cmd.motor_cmd[i].mode = 1
                         cmd.motor_cmd[i].q = target_pos[i]
@@ -148,30 +220,17 @@ class G1VRController(Node):
                         cmd.motor_cmd[i].kp = 20.0
                         cmd.motor_cmd[i].kd = 1.0
                         cmd.motor_cmd[i].tau = 0.0
+                    
+                    self.get_logger().info(f"Dex3 {side} hand commanded to {'OPEN' if to_open else 'CLOSE'}")
+                    publish_required = True
 
-            if self.hand_state[side] != self.current_hand_state[side]:
-                to_open = self.hand_state[side]
-                self.current_hand_state[side] = self.hand_state[side]
-                if to_open and self.overTorque:
-                    self.overTorque = False
-
-                #assume open, change if not
-                target_pos = [0, 0, 0, 0, 0, 0, 0]
-                if not to_open and not self.overTorque:
-                    target_pos = [0, 0, 1.75, -1.57, -1.75, -1.57, -1.75] if side == "left" else [0, 0, -1.75, 1.57, 1.57, 1.57, 1.57]
-                
-                for i in range(7):
-                    cmd.motor_cmd[i].mode = 1
-                    cmd.motor_cmd[i].q = target_pos[i]
-                    cmd.motor_cmd[i].dq = 0.0
-                    cmd.motor_cmd[i].kp = 20.0
-                    cmd.motor_cmd[i].kd = 1.0
-                    cmd.motor_cmd[i].tau = 0.0
-
+            # Publish if any changes were made
+            if publish_required:
                 pub.Write(cmd)
-                self.get_logger().info(f"Dex3 {side} hand commanded to {'OPEN' if to_open else 'CLOSE'}")
     
+        
     def controlLoop(self):
+        #startTime = time.perf_counter()
         if self.first_read:
             self.get_logger().info("WAITING TO SUBSCRIBE HAND DATA")
             return
@@ -191,7 +250,18 @@ class G1VRController(Node):
 
         try:
             self.control_hand()
-
+            if self.state == RobotState.RETURNING_HOME:
+                self.get_logger().info("shutting down")
+                #tell the arm to return home
+                self.target_pos_l = np.array([0.1, 0.2, -0.3])
+                self.target_rot_l = np.eye(3)
+                self.target_pos_r = np.array([0.2, -0.2, -0.25])
+                self.target_rot_r = np.array([
+                    [1.0,  0.0,  0.0],
+                    [0.0, np.cos(-np.pi/6.0),  -np.sin(-np.pi/6.0)],
+                    [0.0,  np.sin(-np.pi/6.0), np.cos(-np.pi/6.0)]
+                ])
+                self.num_iter_to_home = self.num_iter_to_home + 1
             # Solve IK for both arms
             raw_q, v_Cmd, success = self.ik_solver.solve(
                 self.target_pos_l, self.target_rot_l, 
@@ -204,6 +274,7 @@ class G1VRController(Node):
             self.last_solved_q = qCmd
 
             # Send commands
+            
             for name, motorId in JOINT_MAP.items():
                 if self.ik_solver.model.existJointName(name):
                     idx_q = self.ik_solver.model.joints[self.ik_solver.model.getJointId(name)].idx_q
@@ -219,7 +290,21 @@ class G1VRController(Node):
             
             self.cmd.crc = self.crc.Crc(self.cmd)
             self.pub.Write(self.cmd)
-            print(f"L Torque: {self.torque_cur['left']}")
+            if self.state == RobotState.RETURNING_HOME and self.num_iter_to_home > 500:
+                self.get_logger().info("Reached home, shut down SUCCESSFUL")
+                self.state = RobotState.DONE
+                for i in range(35):
+                    self.cmd.motor_cmd[i].mode = 0x01 
+                    self.cmd.motor_cmd[i].q = 0.0
+                    self.cmd.motor_cmd[i].kp = 0.0
+                    self.cmd.motor_cmd[i].dq = 0.0
+                    self.cmd.motor_cmd[i].tau = 0.0
+                    self.cmd.motor_cmd[i].kd = 1.0    
+                self.cmd.crc = self.crc.Crc(self.cmd)
+                self.pub.Write(self.cmd)
+                if rclpy.ok():
+                    rclpy.shutdown()
+            
         except (KeyboardInterrupt, RuntimeError) as e:
             print(f"\n[Interrupt/Error] Exiting cleanly... {e}")
             for i in range(35):
@@ -231,6 +316,10 @@ class G1VRController(Node):
                 self.cmd.motor_cmd[i].kd = 1.0    
             self.cmd.crc = self.crc.Crc(self.cmd)
             self.pub.Write(self.cmd)
+        #endTime = time.perf_counter()
+        #latency_ms = (endTime - startTime) * 1000
+        #print(f"Component latency: {latency_ms:.2f} ms")
+
 
 def main(args=None):
     ChannelFactoryInitialize(0) 

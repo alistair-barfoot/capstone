@@ -66,8 +66,8 @@ class DualArmIKSolver:
         right_elbow_xy = cdata.oMf[self.right_elbow_id].translation[:2]
         
         # Create a function that calculates the squared distance from the Z-axis (X=0, Y=0)
-        elbow_dist_sq_L_fn = casadi.Function("dist_L", [cq], [casadi.sumsqr(left_elbow_xy)])
-        elbow_dist_sq_R_fn = casadi.Function("dist_R", [cq], [casadi.sumsqr(right_elbow_xy)])
+        elbow_dist_L_fn = casadi.Function("dist_L", [cq], [casadi.sumsqr(left_elbow_xy)])
+        elbow_dist_R_fn = casadi.Function("dist_R", [cq], [casadi.sumsqr(right_elbow_xy)])
 
         self.opti = casadi.Opti()
         self.varQ = self.opti.variable(self.model.nq)
@@ -92,8 +92,8 @@ class DualArmIKSolver:
         #prevent elbows from hitting robot
         safe_radius = 0.165  # 16 cm radius
         safe_radius_sq = safe_radius ** 2 
-        costCol_L = casadi.sumsqr(casadi.fmax(0, safe_radius_sq - elbow_dist_sq_L_fn(self.varQ)))
-        costCol_R = casadi.sumsqr(casadi.fmax(0, safe_radius_sq - elbow_dist_sq_R_fn(self.varQ)))
+        costCol_L = casadi.sumsqr(casadi.fmax(0, safe_radius_sq - elbow_dist_L_fn(self.varQ)))
+        costCol_R = casadi.sumsqr(casadi.fmax(0, safe_radius_sq - elbow_dist_R_fn(self.varQ)))
 
         self.opti.minimize(100. * cost_trans + 10.0 * cost_rot + 0.02 * cost_reg + 2.0 * cost_smooth + 0.05 * cost_posture + 10000. * (costCol_L + costCol_R))
 
